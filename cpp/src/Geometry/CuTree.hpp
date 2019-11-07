@@ -3,12 +3,13 @@
 
 #include "Vector3.h"
 #include <vector>
-#include "Cuboid.h"
+//#include "Cuboid.h"
 
 template <typename T>
 class CuVec3{
 public:
     __device__ __host__ CuVec3();
+    __device__ __host__ const T& operator[](const int& d);
     T x, y, z;
 };
 
@@ -17,6 +18,14 @@ __device__ __host__ CuVec3<T>::CuVec3(){
     x = 0;
     y = 0;
     z = 0;
+}
+
+template <typename T>
+__device__ __host__ const T& CuVec3<T>::operator[](const int& d){
+    if(d == 0) return x;
+    if(d == 1) return y;
+    if(d == 2) return z;
+    return 0;
 }
 
 template <typename T>
@@ -49,10 +58,10 @@ __device__ void CuCuboid<T>::setMinCoords(T x, T y, T z){
 
 template <class T>
 class CuTree{
-private:
-    struct CuTreeNode{
+//private:
+    /*struct CuTreeNode{
         CuCuboid<T> bb;
-    };
+    };*/
 public:
     CuTree(unsigned int maxNodeSize = 4);
     ~CuTree();
@@ -62,7 +71,7 @@ public:
     void PrintDataStructureStats() const;
     void printSearchStats() const;
 
-private:
+//private:
     struct Node{
         CuCuboid<double> aabb;
         unsigned int objectBegin, objectsEnd;
@@ -72,11 +81,8 @@ private:
     unsigned int curSize;
     std::vector<Node> aabbTree;
     Node* d_aabbTree;
-    std::vector<T> sortedObjects*;
+    std::vector<T> *sortedObjects;
     T* d_sortedObjects;
-
-    void computeAABBBounds(unsigned int nodeIndex);
-    void splitAABBNode(unsigned int nodeIndex, int splitDim);
 };
 
 template <typename T>
@@ -99,8 +105,23 @@ CuTree<T>::~CuTree(){
 template <typename T>
 __global__ void cuPreprocess(Node* tree, unsigned int nodes, T* objs, unsigned int numObjs){
     unsigned int i = threadIdx.x+blockIdx.x*blockDim.x, offset = gridDim.x*blockDim.x;
-    for(unsigned int j = i; j < numObjs; j += offset){
-        
+    short dim = 0;
+    for(unsigned int j = 1; j < numObjs; j <<= 1){
+        if(i < j){
+            int range = nodes[j-1+i].objectsBegin - nodes[j-1+i].objectsEnd, obB = nodes[j-1+i].objectsBegin;
+            for(int l = 0; l < range; ++l){
+                double midl = objs[obB+l].maxCoords[dim]+objs[obB+l].minCoords[dim];
+                for(int k = l+1; k < range; ++k){
+                    double midk = objs[obB+k].maxCoords[dim]+objs[obB+k].minCoords[dim];
+                    if(midk < midl){
+                        T temp = objs[obB+k];
+                        objs[obB+k] = objs[obB+l];
+                        objs[obB+l] = temp;
+                    }
+                }
+            }
+        }
+        dim = dim+1 == 3 ? 0 : dim+1;
     }
 }
 
