@@ -35,6 +35,7 @@ public:
     CuVec3<T> maxCoords, minCoords;
     __device__ void setMaxCoords(T x, T y, T z);
     __device__ void setMinCoords(T x, T y, T z);
+    __device__ T dist(CuVec3<T> const& point) const;
 };
 
 template <typename T>
@@ -56,12 +57,21 @@ __device__ void CuCuboid<T>::setMinCoords(T x, T y, T z){
     this->minCoords.z = z;
 }
 
+template <typename T>
+__device__ T CuCuboid<T>::dist(CuVec3<T> const& point) const{
+    T d = 0;
+    CuVec3<T> max;
+    for(int i = 0; i < 3; ++i){
+        max[i] = minCoords[i] - point[i] > point[i] - maxCoords[i] ? minCoords[i] - point[i] : point[i] - maxCoords[i];
+        if(max[i] > 0){
+            d += max[i]*max[i];
+        }
+    }
+    return d;
+}
+
 template <class T>
 class CuTree{
-//private:
-    /*struct CuTreeNode{
-        CuCuboid<T> bb;
-    };*/
 public:
     CuTree(unsigned int maxNodeSize = 4);
     ~CuTree();
@@ -71,7 +81,6 @@ public:
     void PrintDataStructureStats() const;
     void printSearchStats() const;
 
-//private:
     struct Node{
         CuCuboid<double> aabb;
         unsigned int objectBegin, objectsEnd;
@@ -108,7 +117,7 @@ __global__ void cuPreprocess(Node* tree, unsigned int nodes, T* objs, unsigned i
     short dim = 0;
     for(unsigned int j = 1; j < numObjs; j <<= 1){
         if(i < j){
-            int range = nodes[j-1+i].objectsBegin - nodes[j-1+i].objectsEnd, obB = nodes[j-1+i].objectsBegin;
+            int range = tree[j-1+i].objectsBegin - tree[j-1+i].objectsEnd, obB = tree[j-1+i].objectsBegin, mid = obB+(range>>1);
             for(int l = 0; l < range; ++l){
                 double midl = objs[obB+l].maxCoords[dim]+objs[obB+l].minCoords[dim];
                 for(int k = l+1; k < range; ++k){
@@ -120,8 +129,15 @@ __global__ void cuPreprocess(Node* tree, unsigned int nodes, T* objs, unsigned i
                     }
                 }
             }
+            tree[(j<<1)+(i<<1)].objectsBegin = obB;
+            tree[(j<<1)+(i<<1)].objectsEnd = mid;
+            tree[(j<<1)+(i<<1)+1].objectsBegin = mid;
+            tree[(j<<1)+(i<<1)+1].objectsEnd = tree[j-1+i].objectsEnd;
+            tree[j-1+i].objectsBegin = 0;
+            tree[j-1+i].objectsEnd = 0;
         }
         dim = dim+1 == 3 ? 0 : dim+1;
+        __syncthreads();
     }
 }
 
@@ -134,12 +150,55 @@ void CuTree<T>::preprocess(vector<T>* objects){
     while(!(mask & objects->size()))
         mask >>= 1;
     mask <<= 1;
-
+    curSize = mask;
     cudaMalloc((void**)&d_aabbTree, mask*sizeof(Node));
     cudaMalloc((void**)&d_sortedObjects, objects.size()*sizeof(T));
     cudaMemcpy(d_sortedObjects, objects->data(), objects->size()*sizeof(T));
-    cuPreprocess<<<1, 512>>>(d_aabbTree, aabbTree.size(), d_sortedObjects, objects->size());
+    cuPreprocess<<<1, 512>>>(d_aabbTree, mask, d_sortedObjects, objects->size());
     cudaDeviceSynchronize();
+}
+
+
+
+template <typename T>
+__global__ void cuNearest(CuVec3<T>* points, unsigned int numPoints, Node* tree, unsigned int nodes, T* objs, unsigned int numObjs, T*** stack, unsigned int ss, T const ** nearestObject, double** minDistanceSqr){
+    if(nodes == 0)
+        return;
+    extern __shared__ T** s[];
+    int i = threadIdx.x+blockDim.x*blockIdx.x, offset = gridDim.x*blockDim.x;
+    s[i] = stack[i];
+    for(int j = i; j < numPoints; j += offset){
+        //for each queryPoint, descend down tree, pushing nodes to stack for this thread and finding minD^2 for each node. Store to nearestObject[j] and store minD^2 to minDistanceSquared[j]
+        s[0] = &tree[0];
+        while(true){
+
+        }
+    }
+}
+
+template <typename T>
+__global__ void initializeStacks(T*** stack, unsigned int numT, unsigned int stackSize){
+    unsigned int i = threadIdx.x+blockIdx.x*blockDim.x, offset = gridDim.x*blockDim.x;
+    for(int j = i; j < numT; j += offset){
+        for(int k = 0; k < stackSize; ++k){
+            stack[j][k] = 0;
+        }
+    }
+}
+
+template <typename T>
+void CuTree<T>::findNearestObject(vector<Vector3<double>> const & queryPoints, T const ** nearestObject, double** minDistanceSqr) const{
+    unsigned int ss = (curSize - 1) >> 1;
+    T*** stacks, d_stacks;
+    stacks = new T**[NUMTHREADS];
+    for(int i = 0; i < NUMTHREADS; ++i){ //this stack configuration is extremely inefficient as far as access time, need to coalesce
+        cudaMalloc((void**)&stacks[i], sizeof(T*)*ss);
+    }
+    cudaMalloc((void**)&d_stacks, sizeof(T**)*NUMTHREADS);
+    cudaMemcpy(d_stacks, stacks, sizeof(T**)*NUMTHREADS, cudaMemcpyHostToDevice);
+    initializeStacks<<<1, NUMTHREADS>>>(d_stacks, NUMTHREADS, ss);
+    cudaDeviceSynchronize();
+    cuNearest<<<1, NUMTHREADS, NUMTHREADS*sizeof(T***)>>>(d_qp, queryPoints.size(), d_aabbTree, curSize, d_stacks, ss, d_nO, d_minD);
 }
 
 #endif
